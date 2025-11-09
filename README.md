@@ -39,15 +39,27 @@ npm run dev
 Open the printed localhost URL (default `http://localhost:5173`).
 
 ### Firebase configuration
-Before running, provide real project values in `client/index.html`:
-```html
-<script>
-  window.__firebase_config = { ... }; // copy/paste from Firebase console
-  window.__app_id = 'smart-home-demo';
-  // window.__initial_auth_token = 'optional-custom-token';
-</script>
-```
-The app falls back to anonymous auth when `__initial_auth_token` is omitted. Firestore security rules should allow the demo user to read/write the `devices`, `events`, `alerts`, `contacts`, `home_policies`, `home_models`, and `home_registrations` collections.
+Pick whichever option is easier for your team:
+
+1. **.env (recommended for devs).**
+   ```bash
+   cd client
+   cp .env.example .env.local
+   # edit .env.local with your Firebase values
+   ```
+   The app automatically reads `VITE_FIREBASE_*` variables (see `.env.example`) so you never have to edit HTML files.
+
+2. **Inline globals (handy for quick demos).**  
+   Drop a script into `client/index.html`:
+   ```html
+   <script>
+     window.__firebase_config = { ... }; // copy/paste from Firebase console
+     window.__app_id = 'smart-home-demo';
+     // window.__initial_auth_token = 'optional-custom-token';
+   </script>
+   ```
+
+If both are present, inline globals win. The app falls back to anonymous auth when `__initial_auth_token`/`VITE_FIREBASE_CUSTOM_TOKEN` are omitted. Ensure your Firestore rules allow the demo user to read/write the `devices`, `events`, `alerts`, `contacts`, `home_policies`, `home_models`, and `home_registrations` collections.
 
 ### Simulated cloud flows
 | UI Action | Simulated Cloud Component |

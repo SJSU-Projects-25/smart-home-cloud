@@ -37,26 +37,45 @@ import {
   Signal,
   SlidersHorizontal,
   Waves,
-  ArrowRightCircle,
   BadgeCheck,
   PhoneCall,
   Sparkles,
   Users,
 } from 'lucide-react'
 
-const firebaseConfig =
-  typeof globalThis !== 'undefined' && globalThis.__firebase_config
-    ? globalThis.__firebase_config
-    : {
-        apiKey: 'demo-api-key',
-        authDomain: 'smart-home-cloud.firebaseapp.com',
-        projectId: 'smart-home-cloud',
+const envFirebaseConfig =
+  typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_API_KEY
+    ? {
+        apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+        authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+        projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+        storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+        messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+        appId: import.meta.env.VITE_FIREBASE_APP_ID,
+        measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
       }
+    : null
+
+const firebaseConfig =
+  (typeof globalThis !== 'undefined' && globalThis.__firebase_config) ||
+  envFirebaseConfig || {
+    apiKey: 'demo-api-key',
+    authDomain: 'smart-home-cloud.firebaseapp.com',
+    projectId: 'smart-home-cloud',
+  }
+
+const appName =
+  (typeof globalThis !== 'undefined' && globalThis.__app_id) ||
+  import.meta.env?.VITE_FIREBASE_APP_NAME ||
+  'smart-home-demo'
+
+const injectedCustomToken =
+  (typeof globalThis !== 'undefined' && globalThis.__initial_auth_token) ||
+  import.meta.env?.VITE_FIREBASE_CUSTOM_TOKEN ||
+  ''
 
 // Firebase/Firestore setup replaces the relational PostgreSQL/Amazon RDS data tier for this demo build.
-const firebaseApp = getApps().length
-  ? getApp()
-  : initializeApp(firebaseConfig, globalThis.__app_id || 'smart-home-demo')
+const firebaseApp = getApps().length ? getApp() : initializeApp(firebaseConfig, appName)
 
 const db = getFirestore(firebaseApp)
 const auth = getAuth(firebaseApp)
@@ -281,8 +300,8 @@ function App() {
     try {
       const trimmedHome = (homeInput || '').trim() || 'home-alpha'
       let credential
-      if (globalThis.__initial_auth_token) {
-        credential = await signInWithCustomToken(auth, globalThis.__initial_auth_token)
+      if (injectedCustomToken) {
+        credential = await signInWithCustomToken(auth, injectedCustomToken)
       } else {
         credential = await signInAnonymously(auth)
       }

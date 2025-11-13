@@ -132,6 +132,43 @@ const formatTimestamp = (timestamp) => {
 
 const randomFrom = (list) => list[Math.floor(Math.random() * list.length)]
 
+const diagnosticsLogTemplates = [
+  { type: 'info', message: 'Edge agent synced configuration from cloud' },
+  { type: 'warning', message: 'Transient packet loss detected; retry scheduled' },
+  { type: 'info', message: 'Heartbeat acknowledged by ingestion API' },
+  { type: 'error', message: 'Audio buffer underrun resolved automatically' },
+  { type: 'info', message: 'Firmware watchdog check completed' },
+]
+
+const generateDiagnosticsPayload = (device) => {
+  const now = Date.now()
+  const lastHeartbeat = now - (Math.floor(Math.random() * 4) + 1) * 60 * 1000
+  const logs = Array.from({ length: 4 }).map((_, index) => {
+    const template = diagnosticsLogTemplates[(index + device.name.length) % diagnosticsLogTemplates.length]
+    return {
+      ...template,
+      id: `${device.id}-log-${index}`,
+      timestamp: now - index * 90 * 1000,
+    }
+  })
+  return {
+    firmware: device.firmware_version || `1.0.${(device.name.length % 5) + 2}`,
+    lastHeartbeat,
+    rssi: -40 - Math.floor(Math.random() * 35),
+    signalQuality: randomFrom(['Excellent', 'Good', 'Fair']),
+    logs,
+  }
+}
+
+const formatRelativeTime = (timestampMs) => {
+  if (!timestampMs) return '—'
+  const diffMinutes = Math.round((Date.now() - timestampMs) / 60000)
+  if (diffMinutes <= 0) return 'just now'
+  if (diffMinutes < 60) return `${diffMinutes}m ago`
+  const diffHours = Math.round(diffMinutes / 60)
+  return `${diffHours}h ago`
+}
+
 function App() {
   const [screen, setScreen] = useState('landing')
   const [role, setRole] = useState(roleOptions[0])
@@ -177,6 +214,12 @@ function App() {
   })
   const [registerBusy, setRegisterBusy] = useState(false)
   const registerNameRef = useRef(null)
+  const [diagnosticsPanel, setDiagnosticsPanel] = useState(null)
+  const [selectedAlert, setSelectedAlert] = useState(null)
+  const [noteInput, setNoteInput] = useState('')
+  const [noteSubmitting, setNoteSubmitting] = useState(false)
+  const [notesLoading, setNotesLoading] = useState(false)
+  const [activeAlertNotes, setActiveAlertNotes] = useState([])
 
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [toasts, setToasts] = useState([])
@@ -206,6 +249,50 @@ function App() {
       registerNameRef.current.focus()
     }
   }, [screen])
+
+  useEffect(() => {
+    if (!selectedAlert) return
+    const latest = alerts.find((alert) => alert.id === selectedAlert.id)
+    if (!latest) return
+    const hasChanged =
+      latest.status !== selectedAlert.status ||
+      latest.severity !== selectedAlert.severity ||
+      (latest.updated_at?.seconds || latest.updated_at) !==
+        (selectedAlert.updated_at?.seconds || selectedAlert.updated_at)
+    if (hasChanged) {
+      setSelectedAlert(latest)
+    }
+  }, [alerts, selectedAlert])
+
+  useEffect(() => {
+    if (!selectedAlert) {
+      setActiveAlertNotes([])
+      return
+    }
+    setNotesLoading(true)
+    const notesRef = collection(db, 'alert_notes')
+    const q = query(notesRef, where('alert_id', '==', selectedAlert.id))
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const nextNotes = snapshot.docs
+          .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
+          .sort((a, b) => {
+            const aTs = a.created_at?.seconds
+              ? a.created_at.seconds
+              : a.created_at || 0
+            const bTs = b.created_at?.seconds
+              ? b.created_at.seconds
+              : b.created_at || 0
+            return bTs - aTs
+          })
+        setActiveAlertNotes(nextNotes)
+        setNotesLoading(false)
+      },
+      () => setNotesLoading(false),
+    )
+    return unsubscribe
+  }, [selectedAlert])
 
   useEffect(() => {
     if (!authUser || !activeHomeId) return
@@ -367,6 +454,50 @@ function App() {
       type: device?.type || deviceTypes[0].value,
     })
     setDeviceModalOpen(true)
+  }
+
+  const openDiagnosticsPanel = (device) => {
+    setDiagnosticsPanel({
+      device,
+      payload: generateDiagnosticsPayload(device),
+    })
+  }
+
+  const openAlertDetail = (alert) => {
+    setSelectedAlert(alert)
+    setNoteInput('')
+  }
+
+  const addAlertNote = async (event) => {
+    event.preventDefault()
+    if (!selectedAlert || !noteInput.trim()) {
+      pushToast('Note required', 'Enter a short update before saving.', 'error')
+      return
+    }
+    setNoteSubmitting(true)
+    try {
+      await addDoc(collection(db, 'alert_notes'), {
+        alert_id: selectedAlert.id,
+        home_id: selectedAlert.home_id,
+        author: role,
+        message: noteInput.trim(),
+        created_at: serverTimestamp(),
+      })
+      setNoteInput('')
+      pushToast('Note added', 'Alert timeline updated', 'success')
+    } catch (error) {
+      pushToast('Note failed', error.message, 'error')
+    } finally {
+      setNoteSubmitting(false)
+    }
+  }
+
+  const closeDiagnosticsPanel = () => setDiagnosticsPanel(null)
+
+  const closeAlertDetail = () => {
+    setSelectedAlert(null)
+    setNoteInput('')
+    setActiveAlertNotes([])
   }
 
   const saveDevice = async (event) => {
@@ -569,14 +700,20 @@ function App() {
       return (
         <div className="flex gap-2">
           <button
-            onClick={() => updateAlertStatus(alert, 'acked')}
+            onClick={(event) => {
+              event.stopPropagation()
+              updateAlertStatus(alert, 'acked')
+            }}
             className="px-3 py-1.5 text-xs rounded-full bg-amber-500/20 text-amber-200 border border-amber-500/30"
             disabled={alertBusy === alert.id}
           >
             Ack
           </button>
           <button
-            onClick={() => updateAlertStatus(alert, 'escalated')}
+            onClick={(event) => {
+              event.stopPropagation()
+              updateAlertStatus(alert, 'escalated')
+            }}
             className="px-3 py-1.5 text-xs rounded-full bg-indigo-500/20 text-indigo-200 border border-indigo-500/30"
             disabled={alertBusy === alert.id}
           >
@@ -588,7 +725,10 @@ function App() {
     if (alert.status === 'acked') {
       return (
         <button
-          onClick={() => updateAlertStatus(alert, 'closed')}
+          onClick={(event) => {
+            event.stopPropagation()
+            updateAlertStatus(alert, 'closed')
+          }}
           className="px-3 py-1.5 text-xs rounded-full bg-emerald-500/20 text-emerald-200 border border-emerald-500/30"
           disabled={alertBusy === alert.id}
         >
@@ -600,14 +740,20 @@ function App() {
       return (
         <div className="flex gap-2">
           <button
-            onClick={() => updateAlertStatus(alert, 'acked')}
+            onClick={(event) => {
+              event.stopPropagation()
+              updateAlertStatus(alert, 'acked')
+            }}
             className="px-3 py-1.5 text-xs rounded-full bg-amber-500/20 text-amber-200 border border-amber-500/30"
             disabled={alertBusy === alert.id}
           >
             Ack
           </button>
           <button
-            onClick={() => updateAlertStatus(alert, 'closed')}
+            onClick={(event) => {
+              event.stopPropagation()
+              updateAlertStatus(alert, 'closed')
+            }}
             className="px-3 py-1.5 text-xs rounded-full bg-emerald-500/20 text-emerald-200 border border-emerald-500/30"
             disabled={alertBusy === alert.id}
           >
@@ -719,6 +865,13 @@ function App() {
                 {clipBusy === device.id ? 'Simulating...' : 'Send Test Clip'}
               </button>
               <button
+                onClick={() => openDiagnosticsPanel(device)}
+                className="px-4 py-2 rounded-full bg-slate-900 border border-slate-700 text-slate-100 text-sm inline-flex items-center gap-2"
+              >
+                <ServerCog className="w-4 h-4" />
+                Diagnostics
+              </button>
+              <button
                 onClick={() => openDeviceModal(device)}
                 className="px-4 py-2 rounded-full bg-slate-800 border border-slate-700 text-slate-100 text-sm"
               >
@@ -748,7 +901,8 @@ function App() {
         {alerts.map((alert) => (
           <div
             key={alert.id}
-            className="border border-slate-800 rounded-2xl p-4 bg-slate-950/40 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4"
+            onClick={() => openAlertDetail(alert)}
+            className="border border-slate-800 rounded-2xl p-4 bg-slate-950/40 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 cursor-pointer transition hover:border-sky-500/40"
           >
             <div className="flex items-start gap-3">
               <div className="p-2 rounded-xl bg-slate-800">
@@ -970,7 +1124,11 @@ function App() {
           </div>
           <div className="mt-6 space-y-4 flex-1">
             {alerts.slice(0, 4).map((alert) => (
-              <div key={alert.id} className="border border-slate-800 rounded-2xl p-4 bg-slate-950/50">
+              <div
+                key={alert.id}
+                onClick={() => openAlertDetail(alert)}
+                className="border border-slate-800 rounded-2xl p-4 bg-slate-950/50 cursor-pointer hover:border-sky-500/40 transition"
+              >
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="font-medium">{alert.type_label || alert.type}</p>
@@ -1408,6 +1566,179 @@ function App() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {diagnosticsPanel && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-40 px-4">
+          <div className="bg-slate-950 border border-slate-800 rounded-3xl w-full max-w-3xl p-8 space-y-6">
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Diagnostics</p>
+                <h3 className="text-2xl font-semibold mt-2">{diagnosticsPanel.device.name}</h3>
+                <p className="text-sm text-slate-500">
+                  {diagnosticsPanel.device.type?.replace('_', ' ')} · Device ID {diagnosticsPanel.device.id}
+                </p>
+              </div>
+              <button onClick={closeDiagnosticsPanel} className="text-slate-500 hover:text-white text-xl leading-none">
+                ✕
+              </button>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs text-slate-500 uppercase">Last heartbeat</p>
+                <p className="text-xl font-semibold mt-1">
+                  {formatRelativeTime(diagnosticsPanel.payload.lastHeartbeat)}
+                </p>
+                <p className="text-xs text-slate-500">
+                  {formatTimestamp(diagnosticsPanel.payload.lastHeartbeat)}
+                </p>
+              </div>
+              <div className="border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs text-slate-500 uppercase">Firmware</p>
+                <p className="text-xl font-semibold mt-1">{diagnosticsPanel.payload.firmware}</p>
+                <p className="text-xs text-slate-500">Edge agent build</p>
+              </div>
+              <div className="border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs text-slate-500 uppercase">RSSI</p>
+                <p className="text-xl font-semibold mt-1">{diagnosticsPanel.payload.rssi} dBm</p>
+                <p className="text-xs text-slate-500">{diagnosticsPanel.payload.signalQuality} signal</p>
+              </div>
+              <div className="border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs text-slate-500 uppercase">Status</p>
+                <p className="text-xl font-semibold mt-1">
+                  {diagnosticsPanel.device.status || 'offline'}
+                </p>
+                <p className="text-xs text-slate-500">
+                  Updated {formatRelativeTime(diagnosticsPanel.device.last_seen_at?.seconds ? diagnosticsPanel.device.last_seen_at.seconds * 1000 : diagnosticsPanel.device.last_seen_at)}
+                </p>
+              </div>
+            </div>
+            <div>
+              <p className="text-sm uppercase tracking-wide text-slate-500 mb-3">Recent logs</p>
+              <div className="space-y-3 max-h-60 overflow-y-auto pr-1">
+                {diagnosticsPanel.payload.logs.map((log) => (
+                  <div key={log.id} className="border border-slate-800 rounded-2xl p-4 bg-slate-900/60">
+                    <div className="flex items-center justify-between">
+                      <span
+                        className={`text-xs px-3 py-1 rounded-full ${
+                          log.type === 'error'
+                            ? 'bg-rose-500/10 text-rose-300 border border-rose-500/30'
+                            : log.type === 'warning'
+                              ? 'bg-amber-500/10 text-amber-300 border border-amber-500/30'
+                              : 'bg-slate-800 text-slate-300 border border-slate-700'
+                        }`}
+                      >
+                        {log.type}
+                      </span>
+                      <p className="text-xs text-slate-500">{formatRelativeTime(log.timestamp)}</p>
+                    </div>
+                    <p className="text-sm text-slate-200 mt-2">{log.message}</p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      {new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedAlert && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-40 px-4">
+          <div className="bg-slate-950 border border-slate-800 rounded-3xl w-full max-w-3xl p-8 space-y-6">
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Alert detail</p>
+                <h3 className="text-2xl font-semibold mt-2">{selectedAlert.type_label || selectedAlert.type}</h3>
+                <p className="text-sm text-slate-500">
+                  Device {selectedAlert.device_name || selectedAlert.device_id} · {formatTimestamp(selectedAlert.created_at)}
+                </p>
+              </div>
+              <button onClick={closeAlertDetail} className="text-slate-500 hover:text-white text-xl leading-none">
+                ✕
+              </button>
+            </div>
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs text-slate-500 uppercase">Severity</p>
+                <span className={`inline-flex px-3 py-1 rounded-full text-sm mt-2 ${severityStyles[selectedAlert.severity] || 'border border-slate-700 text-slate-300'}`}>
+                  {selectedAlert.severity}
+                </span>
+              </div>
+              <div className="border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs text-slate-500 uppercase">Status</p>
+                <span className={`inline-flex px-3 py-1 rounded-full text-sm mt-2 ${statusStyles[selectedAlert.status] || 'border border-slate-700 text-slate-300'}`}>
+                  {selectedAlert.status}
+                </span>
+              </div>
+              <div className="border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs text-slate-500 uppercase">Home</p>
+                <p className="text-lg font-semibold mt-1">{selectedAlert.home_id || activeHomeId}</p>
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs text-slate-500 uppercase">Lifecycle</p>
+                <ul className="mt-2 space-y-2 text-sm text-slate-300">
+                  <li>Created · {formatTimestamp(selectedAlert.created_at)}</li>
+                  {selectedAlert.updated_at && (
+                    <li>Last updated · {formatTimestamp(selectedAlert.updated_at)}</li>
+                  )}
+                </ul>
+              </div>
+              <div className="border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs text-slate-500 uppercase">Actions</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {alertActions(selectedAlert)}
+                </div>
+              </div>
+            </div>
+            <section className="border border-slate-800 rounded-2xl p-4">
+              <p className="text-xs text-slate-500 uppercase mb-3">Notes & timeline</p>
+              <div className="space-y-3 max-h-48 overflow-y-auto pr-1">
+                {notesLoading && <p className="text-sm text-slate-500">Loading notes…</p>}
+                {!notesLoading && activeAlertNotes.length === 0 && (
+                  <p className="text-sm text-slate-500">No notes yet. Add the first update for this alert.</p>
+                )}
+                {activeAlertNotes.map((note) => (
+                  <div key={note.id} className="border border-slate-800 rounded-2xl p-3 bg-slate-900/60">
+                    <div className="flex items-center justify-between text-xs text-slate-500">
+                      <span>{note.author}</span>
+                      <span>
+                        {note.created_at?.seconds
+                          ? formatTimestamp(note.created_at)
+                          : formatTimestamp(note.created_at)}
+                      </span>
+                    </div>
+                    <p className="text-sm text-slate-200 mt-1">{note.message}</p>
+                  </div>
+                ))}
+              </div>
+              <form className="mt-4 space-y-3" onSubmit={addAlertNote}>
+                <textarea
+                  value={noteInput}
+                  onChange={(event) => setNoteInput(event.target.value)}
+                  className="w-full rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 text-sm"
+                  rows={3}
+                  placeholder="Add context for the on-call team…"
+                />
+                <div className="flex justify-end gap-2">
+                  <button type="button" onClick={closeAlertDetail} className="px-4 py-2 rounded-2xl border border-slate-800 text-sm">
+                    Close
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={noteSubmitting}
+                    className="px-5 py-2 rounded-2xl bg-emerald-500 text-slate-950 font-semibold text-sm"
+                  >
+                    {noteSubmitting ? 'Saving…' : 'Add note'}
+                  </button>
+                </div>
+              </form>
+            </section>
           </div>
         </div>
       )}
